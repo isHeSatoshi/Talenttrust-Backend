@@ -7,6 +7,41 @@ const ok = (description: string, schema: object = { type: 'object' }) => ({
 const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'integer' } };
 const contractRef = { $ref: '#/components/schemas/EscrowContract' };
 
+/**
+ * The `Idempotency-Key` request header, shared by every POST.
+ *
+ * Optional by default; `IDEMPOTENCY_REQUIRED=true` makes it mandatory, in which
+ * case a missing key is `400 idempotency_key_required`.
+ */
+const idempotencyParam = {
+  name: 'Idempotency-Key',
+  in: 'header',
+  required: false,
+  schema: { type: 'string', minLength: 1, maxLength: 255, pattern: '^[\\x20-\\x7e]+$' },
+  description:
+    'Opaque retry token, 1-255 printable ASCII characters. Replaying a request with the same ' +
+    'key and the same body returns the original response with `Idempotent-Replayed: true` ' +
+    'instead of applying the mutation twice. Reusing a key with a different body is rejected.',
+};
+
+const errorBody = {
+  type: 'object',
+  properties: { error: { type: 'string' }, message: { type: 'string' } },
+};
+
+/** The two idempotency-specific failures every POST can return. */
+const idempotencyResponses = {
+  409: {
+    description:
+      'idempotency_request_in_progress — a request with this key is still running. Carries `Retry-After`.',
+    content: json(errorBody),
+  },
+  422: {
+    description: 'idempotency_key_reused — this key was already used with a different request body.',
+    content: json(errorBody),
+  },
+};
+
 export const openapi = {
   openapi: '3.0.3',
   info: {
@@ -38,6 +73,7 @@ export const openapi = {
       post: {
         tags: ['Contracts'],
         summary: 'Create an escrow contract',
+        parameters: [idempotencyParam],
         requestBody: {
           required: true,
           content: json({
@@ -55,7 +91,7 @@ export const openapi = {
             },
           }),
         },
-        responses: { 201: { description: 'Created', content: json(contractRef) } },
+        responses: { 201: { description: 'Created', content: json(contractRef) }, ...idempotencyResponses },
       },
     },
     '/api/v1/contracts/{id}': {
@@ -65,49 +101,58 @@ export const openapi = {
       post: {
         tags: ['Contracts'],
         summary: 'Deposit funds into escrow',
-        parameters: [idParam],
+        parameters: [idParam, idempotencyParam],
         requestBody: { content: json({ type: 'object', properties: { amount: { type: 'number' } } }) },
-        responses: ok('Updated contract', contractRef),
+        responses: { ...ok('Updated contract', contractRef), ...idempotencyResponses },
       },
     },
     '/api/v1/contracts/{id}/milestones/{index}/release': {
       post: {
         tags: ['Contracts'],
         summary: 'Release a milestone payment to the freelancer',
-        parameters: [idParam, { name: 'index', in: 'path', required: true, schema: { type: 'integer' } }],
-        responses: ok('Updated contract', contractRef),
+        parameters: [
+          idParam,
+          { name: 'index', in: 'path', required: true, schema: { type: 'integer' } },
+          idempotencyParam,
+        ],
+        responses: { ...ok('Updated contract', contractRef), ...idempotencyResponses },
       },
     },
     '/api/v1/contracts/{id}/dispute': {
       post: {
         tags: ['Contracts'],
         summary: 'Open a dispute',
-        parameters: [idParam],
+        parameters: [idParam, idempotencyParam],
         requestBody: {
           content: json({ type: 'object', properties: { raisedBy: { type: 'string' }, reason: { type: 'string' } } }),
         },
-        responses: ok('Updated contract', contractRef),
+        responses: { ...ok('Updated contract', contractRef), ...idempotencyResponses },
       },
     },
     '/api/v1/contracts/{id}/resolve': {
       post: {
         tags: ['Contracts'],
         summary: 'Resolve a dispute (admin)',
-        parameters: [idParam],
+        parameters: [idParam, idempotencyParam],
         requestBody: { content: json({ type: 'object', properties: { freelancerBps: { type: 'integer' } } }) },
-        responses: ok('Updated contract', contractRef),
+        responses: { ...ok('Updated contract', contractRef), ...idempotencyResponses },
       },
     },
     '/api/v1/contracts/{id}/cancel': {
-      post: { tags: ['Contracts'], summary: 'Cancel and refund', parameters: [idParam], responses: ok('Updated contract', contractRef) },
+      post: {
+        tags: ['Contracts'],
+        summary: 'Cancel and refund',
+        parameters: [idParam, idempotencyParam],
+        responses: { ...ok('Updated contract', contractRef), ...idempotencyResponses },
+      },
     },
     '/api/v1/contracts/{id}/reputation': {
       post: {
         tags: ['Reputation'],
         summary: 'Rate the freelancer of a completed contract',
-        parameters: [idParam],
+        parameters: [idParam, idempotencyParam],
         requestBody: { content: json({ type: 'object', properties: { rating: { type: 'integer', minimum: 1, maximum: 5 } } }) },
-        responses: ok('Reputation'),
+        responses: { ...ok('Reputation'), ...idempotencyResponses },
       },
     },
     '/api/v1/reputation/{address}': {
