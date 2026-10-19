@@ -3,6 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import { config, explorerUrl } from './config';
 import { EscrowStore, HttpError } from './store';
+import { idempotency, type IdempotencyStore } from './idempotency';
 import { openapi, docsHtml } from './openapi';
 
 const startedAt = Date.now();
@@ -23,7 +24,19 @@ const id = (req: Request) => {
   return n;
 };
 
-export function createApp(store: EscrowStore = new EscrowStore().seed()) {
+export interface AppOptions {
+  /** Share a store across apps in tests; defaults to a fresh in-memory store. */
+  idempotencyStore?: IdempotencyStore;
+  /** Make `Idempotency-Key` mandatory on POST. Defaults to `IDEMPOTENCY_REQUIRED`. */
+  idempotencyRequired?: boolean;
+  idempotencyTtlMs?: number;
+  idempotencyMaxEntries?: number;
+}
+
+export function createApp(
+  store: EscrowStore = new EscrowStore().seed(),
+  options: AppOptions = {},
+) {
   const app = express();
   app.disable('x-powered-by');
   // CSP disabled so the /docs page can load Swagger UI from a CDN.
@@ -78,6 +91,17 @@ export function createApp(store: EscrowStore = new EscrowStore().seed()) {
   });
 
   const v1 = express.Router();
+  // Every POST under /api/v1 becomes retry-safe. Mounted before the routes so
+  // the capture wraps `res.json` ahead of any handler, including the error
+  // handler that turns a thrown HttpError into a JSON response.
+  v1.use(
+    idempotency({
+      store: options.idempotencyStore,
+      required: options.idempotencyRequired,
+      ttlMs: options.idempotencyTtlMs,
+      maxEntries: options.idempotencyMaxEntries,
+    }),
+  );
   v1.get(
     '/chain',
     wrap(() => ({
